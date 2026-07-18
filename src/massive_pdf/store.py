@@ -71,8 +71,6 @@ CREATE TABLE IF NOT EXISTS ingest_checkpoints (
 CREATE INDEX IF NOT EXISTS idx_checkpoints_stage ON ingest_checkpoints(stage, status);
 """
 
-SCHEMA = SCHEMA_V1 + SCHEMA_V2
-
 
 @contextmanager
 def connect(db_path: str | Path):
@@ -103,6 +101,58 @@ def list_documents(conn):
 
 
 # ---------------------------------------------------------------------------
+# Slice 3 (issue #4) helpers: clause graph (clauses + clause_references)
+# ---------------------------------------------------------------------------
+
+# NOTE: The slice-3 brief (issue #4) calls for tables `clauses` and
+# `clause_references` instead of the slice-1 `sections`/`edges` placeholders.
+# We add them additively (SCHEMA_V3) so an existing slice-2 DB migrates
+# cleanly. Old tables stay for back-compat until slice-5/6 explicitly retire
+# them.
+
+SCHEMA_V3 = """
+-- Native clause hierarchy: Điều -> Khoản -> Điểm.
+-- `kind` is one of 'dieu' | 'khoan' | 'diem'.
+-- `number` is the local label ('1', '2', 'a', 'b', ...).
+-- `citation` is the canonical human-readable citation
+--   ('Điều 1', 'Khoản 2 Điều 3', 'Điểm a Khoản 2 Điều 3').
+-- `parent_id` links a Khoản to its Điều, a Điểm to its Khoản.
+CREATE TABLE IF NOT EXISTS clauses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL REFERENCES documents(id),
+    parent_id INTEGER REFERENCES clauses(id),
+    kind TEXT NOT NULL CHECK(kind IN ('dieu','khoan','diem')),
+    number TEXT NOT NULL,
+    citation TEXT NOT NULL,
+    page_start INTEGER NOT NULL,
+    page_end INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    ord INTEGER NOT NULL,
+    UNIQUE(document_id, citation)
+);
+CREATE INDEX IF NOT EXISTS idx_clauses_document ON clauses(document_id);
+CREATE INDEX IF NOT EXISTS idx_clauses_parent ON clauses(parent_id);
+CREATE INDEX IF NOT EXISTS idx_clauses_doc_ord ON clauses(document_id, ord);
+
+-- Cross-references between clauses (internal) or to external instruments
+-- (dangling). Internal: dst_clause_id is set. External: dst_clause_id is
+-- NULL and target_citation/target_document_id carry the external pointer.
+CREATE TABLE IF NOT EXISTS clause_references (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    src_clause_id INTEGER NOT NULL REFERENCES clauses(id),
+    dst_clause_id INTEGER REFERENCES clauses(id),
+    kind TEXT NOT NULL CHECK(kind IN ('internal','external')),
+    raw_text TEXT NOT NULL,
+    target_citation TEXT NOT NULL,
+    target_document_id INTEGER REFERENCES documents(id),
+    UNIQUE(src_clause_id, raw_text, target_citation)
+);
+CREATE INDEX IF NOT EXISTS idx_clause_refs_src ON clause_references(src_clause_id);
+CREATE INDEX IF NOT EXISTS idx_clause_refs_dst ON clause_references(dst_clause_id);
+CREATE INDEX IF NOT EXISTS idx_clause_refs_target_doc ON clause_references(target_document_id);
+"""
+
+SCHEMA = SCHEMA_V1 + SCHEMA_V2 + SCHEMA_V3
 # Slice 2 helpers: pages registry + ingest checkpoints
 # ---------------------------------------------------------------------------
 
@@ -195,3 +245,155 @@ def get_document(conn, document_id: int):
 def get_document_by_path(conn, source_path: str):
     row = conn.execute("SELECT * FROM documents WHERE source_path=?", (source_path,)).fetchone()
     return dict(row) if row else None
+
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Slice 3 helpers: clause CRUD + reference CRUD
+# ---------------------------------------------------------------------------
+
+def upsert_clause(conn, *, document_id: int, parent_id: int | None,
+                  kind: str, number: str, citation: str,
+                  page_start: int, page_end: int, body: str,
+                  ord: int) -> int:
+    """Insert or update a clause keyed on (document_id, citation).
+
+    Returns the clause id. Updating an existing row preserves its id so
+    references remain stable across re-runs.
+    """
+    if kind not in ("dieu", "khoan", "diem"):
+        raise ValueError(f"clause kind must be dieu|khoan|diem, got {kind!r}")
+    conn.execute(
+        """
+        INSERT INTO clauses(document_id, parent_id, kind, number, citation,
+                            page_start, page_end, body, ord)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(document_id, citation) DO UPDATE SET
+            parent_id=excluded.parent_id,
+            kind=excluded.kind,
+            number=excluded.number,
+            page_start=excluded.page_start,
+            page_end=excluded.page_end,
+            body=excluded.body,
+            ord=excluded.ord
+        """,
+        (document_id, parent_id, kind, number, citation,
+         page_start, page_end, body, ord),
+    )
+    row = conn.execute(
+        "SELECT id FROM clauses WHERE document_id=? AND citation=?",
+        (document_id, citation),
+    ).fetchone()
+    return row[0]
+
+
+def get_clause(conn, clause_id: int):
+    row = conn.execute("SELECT * FROM clauses WHERE id=?", (clause_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_clause_by_citation(conn, document_id: int, citation: str):
+    row = conn.execute(
+        "SELECT * FROM clauses WHERE document_id=? AND citation=?",
+        (document_id, citation),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_clauses(conn, document_id: int):
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM clauses WHERE document_id=? ORDER BY ord",
+        (document_id,),
+    ).fetchall()]
+
+
+def list_clause_children(conn, clause_id: int):
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM clauses WHERE parent_id=? ORDER BY ord",
+        (clause_id,),
+    ).fetchall()]
+
+
+def delete_clauses_for_document(conn, document_id: int) -> int:
+    """Hard-delete a document's clauses + their cross-references.
+
+    Used by the resumable `structure` stage when the input changes and
+    a clean rebuild is required. Returns total clauses deleted.
+    """
+    cur = conn.execute("DELETE FROM clause_references WHERE src_clause_id IN "
+                       "(SELECT id FROM clauses WHERE document_id=?)",
+                       (document_id,))
+    refs_deleted = cur.rowcount
+    cur = conn.execute("DELETE FROM clauses WHERE document_id=?", (document_id,))
+    clauses_deleted = cur.rowcount
+    return clauses_deleted
+
+
+def add_clause_reference(conn, *, src_clause_id: int,
+                         dst_clause_id: int | None,
+                         kind: str, raw_text: str, target_citation: str,
+                         target_document_id: int | None) -> int | None:
+    """Insert a cross-reference. Deduplicates on (src, raw_text, target_citation).
+
+    Returns the new row id, or None if a duplicate was suppressed.
+    """
+    if kind not in ("internal", "external"):
+        raise ValueError(f"ref kind must be internal|external, got {kind!r}")
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO clause_references(
+            src_clause_id, dst_clause_id, kind, raw_text,
+            target_citation, target_document_id
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (src_clause_id, dst_clause_id, kind, raw_text,
+         target_citation, target_document_id),
+    )
+    # SQLite keeps `lastrowid` at the previous successful insert when
+    # INSERT OR IGNORE skips a row, so `rowcount` is the reliable
+    # dedup signal.
+    if cur.rowcount == 0:
+        return None
+    return cur.lastrowid
+
+
+def list_clause_references(conn, clause_id: int, direction: str = "out"):
+    """List references where clause_id is the source ('out') or destination ('in')."""
+    if direction == "out":
+        rows = conn.execute(
+            "SELECT * FROM clause_references WHERE src_clause_id=? "
+            "ORDER BY id",
+            (clause_id,),
+        ).fetchall()
+    elif direction == "in":
+        rows = conn.execute(
+            "SELECT * FROM clause_references WHERE dst_clause_id=? "
+            "ORDER BY id",
+            (clause_id,),
+        ).fetchall()
+    else:
+        raise ValueError(f"direction must be in|out, got {direction!r}")
+    return [dict(r) for r in rows]
+
+
+def count_clauses_by_kind(conn, document_id: int) -> dict[str, int]:
+    rows = conn.execute(
+        "SELECT kind, COUNT(*) FROM clauses WHERE document_id=? GROUP BY kind",
+        (document_id,),
+    ).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+def dangling_references(conn, document_id: int) -> list[dict]:
+    """External/dangling refs (dst_clause_id IS NULL) for a document."""
+    rows = conn.execute(
+        """
+        SELECT cr.* FROM clause_references cr
+        JOIN clauses c ON c.id = cr.src_clause_id
+        WHERE c.document_id=? AND cr.dst_clause_id IS NULL
+        ORDER BY cr.id
+        """,
+        (document_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
