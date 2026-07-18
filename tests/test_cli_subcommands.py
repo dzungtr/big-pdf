@@ -85,3 +85,30 @@ def test_module_invocation_runs(tmp_path):
     db = tmp_path / "t.sqlite"
     rc = main(["--db", str(db), "list"])
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# Slice 5 (issue #5): rule_cards CLI subcommands
+# ---------------------------------------------------------------------------
+
+def test_cards_cli_unknown_doc(tmp_path, capsys):
+    db = tmp_path / "t.sqlite"
+    rc = main(["--db", str(db), "cards", "999"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "no document with id=999" in err
+
+
+def test_embed_cli_unknown_doc(tmp_path, capsys):
+    db = tmp_path / "t.sqlite"
+    rc = main(["--db", str(db), "embed", "999"])
+    assert rc == 2
+
+
+def test_cards_cli_help_lists_subcommand(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "cards" in out
+    assert "embed" in out

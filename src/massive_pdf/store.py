@@ -85,7 +85,26 @@ def connect(db_path: str | Path):
 def init_db(db_path: str | Path) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        _ensure_v4_columns(conn)
         conn.commit()
+
+
+def _ensure_v4_columns(conn) -> None:
+    """Slice-5 migration: add clause_id to rule_cards (idempotent ALTER).
+
+    The legacy section_id column is left in place for back-compat; new
+    code writes via clause_id. SQLite lacks ADD COLUMN IF NOT EXISTS,
+    so we inspect PRAGMA table_info first.
+    """
+    cols = {row[1] for row in conn.execute(
+        "PRAGMA table_info(rule_cards)"
+    ).fetchall()}
+    if "clause_id" not in cols:
+        conn.execute(
+            "ALTER TABLE rule_cards ADD COLUMN "
+            "clause_id INTEGER REFERENCES clauses(id)"
+        )
+    conn.executescript(SCHEMA_V4_INDEX)
 
 
 def insert_document(conn, source_path: str, title: str | None = None) -> int:
@@ -153,6 +172,14 @@ CREATE INDEX IF NOT EXISTS idx_clause_refs_target_doc ON clause_references(targe
 """
 
 SCHEMA = SCHEMA_V1 + SCHEMA_V2 + SCHEMA_V3
+
+# Slice 4 (issue #5): wire rule_cards to the clauses hierarchy. The
+# `clause_id` column is added additively in a separate migration step
+# (see `_ensure_v4_columns`) so existing slice-1/slice-2/slice-3 DBs
+# migrate cleanly without breaking the legacy `section_id` column.
+SCHEMA_V4_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_rule_cards_clause ON rule_cards(clause_id);
+"""
 # Slice 2 helpers: pages registry + ingest checkpoints
 # ---------------------------------------------------------------------------
 
@@ -397,3 +424,73 @@ def dangling_references(conn, document_id: int) -> list[dict]:
         (document_id,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Slice 4 (issue #5) helpers: rule_cards CRUD + embedding storage
+# ---------------------------------------------------------------------------
+#
+# Cards are now keyed by clause_id (slice-3 hierarchy). The legacy
+# `section_id` column is left in place for back-compat with pre-slice-4
+# rows but no new code writes to it.
+
+def insert_rule_card(conn, *, clause_id: int, statement: str,
+                     embedding: bytes | None = None) -> int:
+    """Insert a rule card bound to a slice-3 clause. Returns the new row id.
+
+    Note: the legacy section_id column from slice-1 is NOT NULL,
+    so we mirror the new clause_id into it for back-compat. The
+    legacy column is no longer the canonical link; only clause_id
+    should be used by new code (see SCHEMA_V4 + idx_rule_cards_clause).
+    """
+    cur = conn.execute(
+        "INSERT INTO rule_cards(clause_id, section_id, statement, embedding) "
+        "VALUES (?, ?, ?, ?)",
+        (clause_id, clause_id, statement, embedding),
+    )
+    return cur.lastrowid
+
+
+def update_rule_card_embedding(conn, rule_card_id: int,
+                               embedding: bytes) -> None:
+    """Overwrite the embedding column for an existing card."""
+    conn.execute(
+        "UPDATE rule_cards SET embedding=? WHERE id=?",
+        (embedding, rule_card_id),
+    )
+
+
+def list_rule_cards_for_clause(conn, clause_id: int) -> list[dict]:
+    """Return all cards bound to a single clause, ordered by insertion id."""
+    rows = conn.execute(
+        "SELECT * FROM rule_cards WHERE clause_id=? ORDER BY id",
+        (clause_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_rule_cards_for_document(conn, document_id: int) -> list[dict]:
+    """Return every card whose owning clause belongs to a document."""
+    rows = conn.execute(
+        """
+        SELECT rc.* FROM rule_cards rc
+        JOIN clauses c ON c.id = rc.clause_id
+        WHERE c.document_id=?
+        ORDER BY rc.id
+        """,
+        (document_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_rule_cards_by_document(conn, document_id: int) -> int:
+    """Total cards bound to a document (used by tests + CLI summary)."""
+    row = conn.execute(
+        """
+        SELECT COUNT(*) FROM rule_cards rc
+        JOIN clauses c ON c.id = rc.clause_id
+        WHERE c.document_id=?
+        """,
+        (document_id,),
+    ).fetchone()
+    return int(row[0])
