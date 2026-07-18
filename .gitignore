@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.massive_pdf.sqlite
+.massive_pdf/
