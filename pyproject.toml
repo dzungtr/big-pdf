@@ -2,4 +2,8 @@
 name = "massive-pdf-agent"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["pytest"]
+dependencies = [
+    "pytest",
+    # Slice 2: PDF -> page images for OCR (issue #3).
+    "pymupdf>=1.24",
+]
