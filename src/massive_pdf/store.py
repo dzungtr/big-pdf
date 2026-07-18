@@ -181,3 +181,17 @@ def completed_page_ordinals(conn, document_id: int, stage: str) -> set[int]:
         (document_id, stage),
     ).fetchall()
     return {r[0] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Slice 2 helpers: document lookup
+# ---------------------------------------------------------------------------
+
+def get_document(conn, document_id: int):
+    row = conn.execute("SELECT * FROM documents WHERE id=?", (document_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_document_by_path(conn, source_path: str):
+    row = conn.execute("SELECT * FROM documents WHERE source_path=?", (source_path,)).fetchone()
+    return dict(row) if row else None
