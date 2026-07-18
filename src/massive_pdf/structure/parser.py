@@ -46,7 +46,7 @@ _DIEU_RE = re.compile(
     r"(?m)^[ \t]*Điều[ \t]+(\d+|[０-９]+)[ \t]*[\.:\-\)]"
 )
 _KHOAN_RE = re.compile(
-    r"(?m)^[ \t]+Khoản[ \t]+(\d+|[０-９]+)[ \t]*[\.:\-\)]"
+    r"(?m)^[ \t]*Khoản[ \t]+(\d+|[０-９]+)[ \t]*[\.:\-\)]"
     # Khoản headers are commonly indented under Điều body
 )
 # Điểm: either "Điểm a)" or a bare "a)" / "a." at line start. Vietnamese
@@ -115,26 +115,37 @@ def _char_to_page(char_offset: int, page_offsets: list[tuple[int, int]]) -> int:
     clamp to the last real page.
     """
     last_real_page = page_offsets[-2][0] if len(page_offsets) >= 2 else page_offsets[-1][0]
+    page = last_real_page
     for ordinal, start in page_offsets:
         if start > char_offset:
-            return ordinal - 1  # previous page
-    return last_real_page
+            break
+        page = ordinal
+    return page
 
 
 def _slice_body(text: str, page_offsets: list[tuple[int, int]],
                 start: int, end: int) -> tuple[int, int, str]:
     """Return (page_start, page_end, body_text) for a slice of the concatenated
-    text. page_end is the page of the *next* header, minus one (so the
-    span is inclusive on both ends).
+    text.
+
+    page_end is computed by walking backwards over the slice and finding
+    the last page that contains any non-whitespace content. This correctly
+    handles both "Điều N spans 2 pages" and "next Điều starts on the same
+    page as this one ends".
     """
     body_text = text[start:end].strip()
-    next_ordinal = _char_to_page(end, page_offsets)
     this_ordinal = _char_to_page(start, page_offsets)
-    # End is the page *before* the next header's page (or last page if no more).
-    page_end = max(this_ordinal, next_ordinal - 1) if next_ordinal > this_ordinal else this_ordinal
-    # Also keep the last page when end is at document end.
-    if end >= page_offsets[-1][1] - 1 and next_ordinal == page_offsets[-1][0]:
-        page_end = next_ordinal
+    # Find the last page with any content in [start, end) by walking back.
+    page_end = this_ordinal
+    # Trim trailing whitespace from end (we don't count a blank page break as content).
+    scan_end = end
+    while scan_end > start and scan_end <= len(text) and text[scan_end - 1] in " \t\n\r":
+        scan_end -= 1
+    if scan_end <= start:
+        return this_ordinal, this_ordinal, body_text
+    # The last page with content is _char_to_page(scan_end - 1).
+    last_content_page = _char_to_page(scan_end - 1, page_offsets)
+    page_end = max(this_ordinal, last_content_page)
     return this_ordinal, page_end, body_text
 
 
@@ -180,13 +191,16 @@ def parse_pages(document_id: int, pages: list[tuple[int, str]]) -> ClauseGraph:
     page_offsets.append((last_page_ordinal + 1, len(text)))  # sentinel
 
     # Find all header matches.
-    headers: list[tuple[int, str, str]] = []  # (offset, kind, number)
+    # (header_start, header_end, kind, number) — header_end is just past
+    # the punctuation so the body slice can skip the header text itself
+    # (an empty-after-header clause like "Điều 1. " has no real body).
+    headers: list[tuple[int, int, str, str]] = []
     for m in _DIEU_RE.finditer(text):
-        headers.append((m.start(), "dieu", _to_ascii_digit(m.group(1))))
+        headers.append((m.start(), m.end(), "dieu", _to_ascii_digit(m.group(1))))
     for m in _KHOAN_RE.finditer(text):
-        headers.append((m.start(), "khoan", _to_ascii_digit(m.group(1))))
+        headers.append((m.start(), m.end(), "khoan", _to_ascii_digit(m.group(1))))
     for m in _DIEM_RE.finditer(text):
-        headers.append((m.start(), "diem", m.group(1)))
+        headers.append((m.start(), m.end(), "diem", m.group(1)))
 
     # Sort by offset; when two headers start at the same offset, prefer
     # the more specific (deeper) kind. E.g. "Khoản 2 Điều 3." on the same
@@ -194,14 +208,14 @@ def parse_pages(document_id: int, pages: list[tuple[int, str]]) -> ClauseGraph:
     # case — same offset means it's a header that mentions a Khoản in
     # its body, not a new clause).
     kind_order = {"dieu": 0, "khoan": 1, "diem": 2}
-    headers.sort(key=lambda h: (h[0], kind_order[h[1]]))
+    headers.sort(key=lambda h: (h[0], kind_order[h[2]]))
 
     # Dedup headers at the same offset, keeping only the topmost kind.
-    deduped: list[tuple[int, str, str]] = []
+    deduped: list[tuple[int, int, str, str]] = []
     for h in headers:
         if deduped and deduped[-1][0] == h[0]:
             # Same position: keep the more "general" kind (lower kind_order).
-            if kind_order[h[1]] < kind_order[deduped[-1][1]]:
+            if kind_order[h[2]] < kind_order[deduped[-1][2]]:
                 deduped[-1] = h
             continue
         deduped.append(h)
@@ -212,17 +226,21 @@ def parse_pages(document_id: int, pages: list[tuple[int, str]]) -> ClauseGraph:
     current_khoan: str | None = None
     parents: dict[str, str] = {}
 
-    last_offset = 0
+    last_header_end = 0  # body of the first clause starts here (=0)
     last_kind: str | None = None
     last_number: str | None = None
 
     # Sentinel end position: end of concatenated text.
     text_end = len(text)
 
-    for offset, kind, number in deduped:
-        # Close the previous clause: its body ends at this header's offset.
+    for header_start, header_end, kind, number in deduped:
+        # Close the previous clause: its body is [last_header_end, header_start).
+        # Using header_end (instead of header_start) means the body
+        # excludes the header punctuation itself.
         if last_kind is not None:
-            ps, pe, body = _slice_body(text, page_offsets, last_offset, offset)
+            ps, pe, body = _slice_body(
+                text, page_offsets, last_header_end, header_start,
+            )
             # Set ord on the previous clause (later overwritten once list built).
             clauses.append(ParsedClause(
                 kind=last_kind,
@@ -247,13 +265,13 @@ def parse_pages(document_id: int, pages: list[tuple[int, str]]) -> ClauseGraph:
             "khoan": current_khoan,
         }
 
-        last_offset = offset
+        last_header_end = header_end
         last_kind = kind
         last_number = number
 
     # Close the final clause (or sentinel document body).
     if last_kind is not None:
-        ps, pe, body = _slice_body(text, page_offsets, last_offset, text_end)
+        ps, pe, body = _slice_body(text, page_offsets, last_header_end, text_end)
         clauses.append(ParsedClause(
             kind=last_kind,
             number=last_number,  # type: ignore[arg-type]

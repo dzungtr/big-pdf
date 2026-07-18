@@ -23,6 +23,7 @@ from .store import (
 )
 from .ingest.pages import DEFAULT_DPI, run_pages_stage
 from .ingest.ocr import StubBackend, run_ocr_stage
+from .structure import check_invariants, run_structure_stage
 
 
 def _ensure_document(db: str, source_path: str, title: str | None) -> int:
@@ -116,6 +117,25 @@ def _build_parser() -> argparse.ArgumentParser:
         "--out", default=".massive_pdf", help="Output root for OCR artifacts"
     )
 
+    p_struct = sub.add_parser(
+        "structure",
+        help="Parse OCR artifacts into a clause graph (slice 3 stage 3)",
+    )
+    p_struct.add_argument("doc_id", type=int, help="Document id")
+    p_struct.add_argument(
+        "--out", default=".massive_pdf", help="Output root for structure artifacts"
+    )
+    p_struct.add_argument(
+        "--rebuild", action="store_true",
+        help="Delete existing clauses for this document before parsing",
+    )
+
+    p_inv = sub.add_parser(
+        "invariants",
+        help="Run structural-invariant checks on a document's clause graph",
+    )
+    p_inv.add_argument("doc_id", type=int, help="Document id")
+
     return parser
 
 
@@ -131,8 +151,46 @@ def main(argv: list[str] | None = None) -> int:
         "list": cmd_list,
         "pages": cmd_pages,
         "ocr": cmd_ocr,
+        "structure": cmd_structure,
+        "invariants": cmd_invariants,
     }[args.command](args)
 
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ---------------------------------------------------------------------------
+# Slice 3 (issue #4): structure + invariants subcommands
+# ---------------------------------------------------------------------------
+
+def cmd_structure(args) -> int:
+    init_db(args.db)
+    with connect(args.db) as conn:
+        doc = get_document(conn, args.doc_id)
+        if doc is None:
+            print(f"structure stage: no document with id={args.doc_id}",
+                  file=sys.stderr)
+            return 2
+    result = run_structure_stage(args.db, args.doc_id, args.out,
+                                 rebuild=args.rebuild)
+    print(
+        f"structure stage: doc_id={args.doc_id} clauses={result['clauses']} "
+        f"refs_internal={result['refs_internal']} "
+        f"refs_external={result['refs_external']} "
+        f"pages={result['pages']} out={args.out}"
+    )
+    return 0
+
+
+def cmd_invariants(args) -> int:
+    init_db(args.db)
+    with connect(args.db) as conn:
+        doc = get_document(conn, args.doc_id)
+        if doc is None:
+            print(f"invariants: no document with id={args.doc_id}",
+                  file=sys.stderr)
+            return 2
+    report = check_invariants(args.db, args.doc_id)
+    print(str(report))
+    return 0 if report.ok else 1

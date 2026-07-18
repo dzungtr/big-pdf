@@ -350,7 +350,10 @@ def add_clause_reference(conn, *, src_clause_id: int,
         (src_clause_id, dst_clause_id, kind, raw_text,
          target_citation, target_document_id),
     )
-    if cur.lastrowid == 0:
+    # SQLite keeps `lastrowid` at the previous successful insert when
+    # INSERT OR IGNORE skips a row, so `rowcount` is the reliable
+    # dedup signal.
+    if cur.rowcount == 0:
         return None
     return cur.lastrowid
 

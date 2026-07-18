@@ -33,8 +33,12 @@ from dataclasses import dataclass
 # Each pattern is `(<regex>, <builder>)` where the builder takes the match
 # and returns (target_citation, raw_text).
 
-# "Điều N" alone (most common internal ref)
-_RE_DIEU = re.compile(r"(Điều|điều)\s+(\d+)(?!\s*[\.:\-\)])")
+# "Điều N" alone (most common internal ref).
+# Match in any position; the parser's line-anchored header regex prevents
+# double-counting at header positions (it consumes those matches first
+# when assembling the graph). In body text we want to catch "Điều 7."
+# at sentence end, so no negative-anchor.
+_RE_DIEU = re.compile(r"(?<![a-zA-ZăâđêôơưĂÂĐÊÔƠƯ])(Điều|điều)\s+(\d+)")
 # "khoản N Điều M" — full path
 _RE_KHOAN_DIEU = re.compile(
     r"(Khoản|khoản)\s+(\d+)\s+(Điều|điều)\s+(\d+)(?!\s*[\.:\-\)])"
@@ -70,7 +74,7 @@ _EXTERNAL_TYPES = [
 _RE_EXTERNAL = re.compile(
     r"(" + "|".join(_EXTERNAL_TYPES) + r")"
     r"\s+số\s+"
-    r"([0-9０-９]+(?:/[0-9０-９]+)*(?:/[A-Za-zĐƠƯ\-]+)?)"
+    r"([0-9０-９]+(?:[/-][0-9０-９A-Za-zĐƠƯ]+)*)"
 )
 
 

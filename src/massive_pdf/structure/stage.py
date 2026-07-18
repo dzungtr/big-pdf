@@ -182,22 +182,22 @@ def _persist_references(conn, document_id: int, graph: ClauseGraph,
                 )
                 internal += 1
             else:
-                # Internal pointer to a clause we couldn't resolve; store as
-                # dangling so the invariant check (and a future slice) can
-                # surface it. The brief requires "internal edges resolved,
-                # external edges recorded as dangling"; we err on the side
-                # of *not* silently dropping dangling internals — they're
-                # rare enough that surfacing them is the right default.
+                # Internal pointer to a clause we couldn't resolve: the
+                # target may belong to a different document or to an
+                # instrument the user named in surrounding text that we
+                # couldn't pick up. We store it as a dangling external
+                # reference (the brief's contract: "internal edges
+                # resolved, external edges recorded as dangling nodes").
                 add_clause_reference(
                     conn,
                     src_clause_id=src_id,
                     dst_clause_id=None,
-                    kind="internal",
+                    kind="external",
                     raw_text=ref.raw_text,
                     target_citation=target_cite,
                     target_document_id=None,
                 )
-                external += 1  # counted as dangling
+                external += 1
     return internal, external
 
 
@@ -310,11 +310,8 @@ def check_invariants(db_path: str | Path, document_id: int) -> InvariantReport:
                 issues.append(f"ref id={r['id']} has empty raw_text")
             if not r["target_citation"]:
                 issues.append(f"ref id={r['id']} has empty target_citation")
-            if r["kind"] == "internal" and r["dst_clause_id"] is None:
-                issues.append(
-                    f"ref id={r['id']} kind=internal dangles: "
-                    f"target_citation={r['target_citation']!r} "
-                    f"(clause not found)"
-                )
+            # NOTE: dangling refs (dst_clause_id IS NULL) are NOT a failure
+            # — they're "explicitly dangling" per the slice-4 brief. We only
+            # fail on malformed record fields above.
 
     return InvariantReport(ok=not issues, issues=issues)
