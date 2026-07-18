@@ -436,11 +436,17 @@ def dangling_references(conn, document_id: int) -> list[dict]:
 
 def insert_rule_card(conn, *, clause_id: int, statement: str,
                      embedding: bytes | None = None) -> int:
-    """Insert a rule card bound to a slice-3 clause. Returns the new row id."""
+    """Insert a rule card bound to a slice-3 clause. Returns the new row id.
+
+    Note: the legacy section_id column from slice-1 is NOT NULL,
+    so we mirror the new clause_id into it for back-compat. The
+    legacy column is no longer the canonical link; only clause_id
+    should be used by new code (see SCHEMA_V4 + idx_rule_cards_clause).
+    """
     cur = conn.execute(
-        "INSERT INTO rule_cards(clause_id, statement, embedding) "
-        "VALUES (?, ?, ?)",
-        (clause_id, statement, embedding),
+        "INSERT INTO rule_cards(clause_id, section_id, statement, embedding) "
+        "VALUES (?, ?, ?, ?)",
+        (clause_id, clause_id, statement, embedding),
     )
     return cur.lastrowid
 

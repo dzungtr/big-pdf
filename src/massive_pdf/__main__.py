@@ -24,6 +24,12 @@ from .store import (
 from .ingest.pages import DEFAULT_DPI, run_pages_stage
 from .ingest.ocr import StubBackend, run_ocr_stage
 from .structure import check_invariants, run_structure_stage
+from .retrieval import (
+    HashBagEncoder,
+    get_default_encoder,
+    run_cards_stage,
+    run_embed_stage,
+)
 
 
 def _ensure_document(db: str, source_path: str, title: str | None) -> int:
@@ -136,6 +142,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_inv.add_argument("doc_id", type=int, help="Document id")
 
+    p_cards = sub.add_parser(
+        "cards",
+        help="Run the rule-cards stage (slice 5): derive cards per clause",
+    )
+    p_cards.add_argument("doc_id", type=int, help="Document id")
+    p_cards.add_argument(
+        "--out", default=".massive_pdf",
+        help="Output root for cards artifacts",
+    )
+    p_cards.add_argument(
+        "--rebuild", action="store_true",
+        help="Delete existing cards + checkpoints before re-running",
+    )
+
+    p_embed = sub.add_parser(
+        "embed",
+        help="Run the embed stage (slice 5): encode rule-card statements",
+    )
+    p_embed.add_argument("doc_id", type=int, help="Document id")
+    p_embed.add_argument(
+        "--dim", type=int, default=HashBagEncoder.DEFAULT_DIM,
+        help="Embedding dim for HashBagEncoder (default 128)",
+    )
+    p_embed.add_argument(
+        "--rebuild", action="store_true",
+        help="Recompute every embedding, ignoring checkpoints",
+    )
+
     return parser
 
 
@@ -153,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
         "ocr": cmd_ocr,
         "structure": cmd_structure,
         "invariants": cmd_invariants,
+        "cards": cmd_cards,
+        "embed": cmd_embed,
     }[args.command](args)
 
 
@@ -194,3 +230,53 @@ def cmd_invariants(args) -> int:
     report = check_invariants(args.db, args.doc_id)
     print(str(report))
     return 0 if report.ok else 1
+
+
+# ---------------------------------------------------------------------------
+# Slice 5 (issue #5): rule-cards subcommands
+# ---------------------------------------------------------------------------
+
+def cmd_cards(args) -> int:
+    init_db(args.db)
+    with connect(args.db) as conn:
+        doc = get_document(conn, args.doc_id)
+        if doc is None:
+            print(f"cards stage: no document with id={args.doc_id}",
+                  file=sys.stderr)
+            return 2
+    result = run_cards_stage(args.db, args.doc_id, args.out,
+                             rebuild=args.rebuild)
+    status = "done" if result["ok"] else "with-errors"
+    print(
+        f"cards stage: doc_id={args.doc_id} "
+        f"clauses_scanned={result['clauses_scanned']} "
+        f"cards_inserted={result['cards_inserted']} "
+        f"skipped={result['skipped']} "
+        f"failed={len(result['failed'])} "
+        f"status={status} out={args.out}"
+    )
+    return 0 if result["ok"] else 1
+
+
+def cmd_embed(args) -> int:
+    init_db(args.db)
+    with connect(args.db) as conn:
+        doc = get_document(conn, args.doc_id)
+        if doc is None:
+            print(f"embed stage: no document with id={args.doc_id}",
+                  file=sys.stderr)
+            return 2
+    encoder = get_default_encoder(dim=args.dim)
+    result = run_embed_stage(args.db, args.doc_id, encoder,
+                             rebuild=args.rebuild)
+    status = "done" if result["ok"] else "with-errors"
+    print(
+        f"embed stage: doc_id={args.doc_id} "
+        f"cards_scanned={result['cards_scanned']} "
+        f"embedded={result['embedded']} "
+        f"skipped={result['skipped']} "
+        f"dim={result['dim']} "
+        f"failed={len(result['failed'])} "
+        f"status={status}"
+    )
+    return 0 if result["ok"] else 1
