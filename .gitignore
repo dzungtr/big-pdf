@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 .massive_pdf.sqlite
 .massive_pdf/
+# Source PDFs (intake for ingestion) — not checked into the repo.
+*.pdf
+*.egg-info/
