@@ -84,16 +84,33 @@ def test_request_body_contains_prompt_and_logit_processor(tmp_path):
     user_msg = body["messages"][0]["content"]
     texts = [part["text"] for part in user_msg if part["type"] == "text"]
     assert VLM_PROMPT in texts
-    # Non-standard anti-repeat logit processor must travel in the body.
-    proc = body.get("custom_logit_processor")
-    assert proc, "custom_logit_processor must be present in the request body"
-    assert proc[0]["class"] == "DeepseekOCRNoRepeatNGramLogitProcessor"
-    assert proc[0]["args"]["ngram_size"] == 35
     # Image is a base64 data URL.
     img_parts = [part for part in user_msg if part["type"] == "image_url"]
     assert img_parts
     url = img_parts[0]["image_url"]["url"]
     assert url.startswith("data:image/png;base64,")
+    # Structural markers survive — the README sets skip_special_tokens=False.
+    assert body.get("skip_special_tokens") is False
+    # README `generate(...)` carries images_config at top level.
+    assert body.get("images_config") == {"image_mode": "gundam"}
+    # custom_params carries the n-gram + window the processor consults.
+    custom_params = body.get("custom_params")
+    assert custom_params is not None
+    assert custom_params.get("ngram_size") == 35
+    assert custom_params.get("window_size") == 128
+    # custom_logit_processor must be the to_str() JSON string the contract
+    # requires (NOT the old list-of-dicts shape the SGLang wheel rejected).
+    proc = body.get("custom_logit_processor")
+    assert isinstance(proc, str), "custom_logit_processor must be a str (to_str())"
+    proc_obj = json.loads(proc)
+    assert "callable" in proc_obj, "to_str() payload must contain the 'callable' key"
+    # Round-trip: the real DeepseekOCRNoRepeatNGramLogitProcessor.to_str()
+    # yields the same string. sglang is installed in this .venv; the import is
+    # local to the test so the suite still imports without the wheel.
+    from sglang.srt.sampling.custom_logit_processor import (
+        DeepseekOCRNoRepeatNGramLogitProcessor,
+    )
+    assert proc == DeepseekOCRNoRepeatNGramLogitProcessor.to_str()
 
 
 def test_connect_error_raises_runtime_error_with_launch_command(tmp_path):
