@@ -22,7 +22,8 @@ from .store import (
     list_documents,
 )
 from .ingest.pages import DEFAULT_DPI, run_pages_stage
-from .ingest.ocr import StubBackend, run_ocr_stage
+from .ingest.ocr import StubBackend, default_backend, run_ocr_stage
+from .ingest.vlm import UnlimitedOcrBackend
 from .structure import check_invariants, run_structure_stage
 from .retrieval import (
     HashBagEncoder,
@@ -74,7 +75,13 @@ def cmd_ocr(args) -> int:
         if doc is None:
             print(f"ocr stage: no document with id={args.doc_id}", file=sys.stderr)
             return 2
-    n = run_ocr_stage(args.db, args.doc_id, args.out, backend=StubBackend())
+    if args.backend == "vlm":
+        backend = UnlimitedOcrBackend()
+    elif args.backend == "stub":
+        backend = StubBackend()
+    else:
+        backend = default_backend()
+    n = run_ocr_stage(args.db, args.doc_id, args.out, backend=backend)
     print(f"ocr stage: doc_id={args.doc_id} pages={n} out={args.out}")
     return 0
 
@@ -207,6 +214,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ocr.add_argument("doc_id", type=int, help="Document id (see `massive-pdf list`)")
     p_ocr.add_argument(
         "--out", default=".massive_pdf", help="Output root for OCR artifacts"
+    )
+    p_ocr.add_argument(
+        "--backend", choices=("stub", "vlm"), default="stub",
+        help="OCR backend: 'stub' (offline placeholder, CI default) or 'vlm' "
+             "(UnlimitedOcrBackend — HTTP client of the SGLang server). The VLM "
+             "backend reads its endpoint from MASSIVE_PDF_VLM_ENDPOINT (default "
+             "http://127.0.0.1:10000/v1); see docs/runbooks/sglang-unlimited-ocr.md "
+             "for the launch recipe. Default: stub.",
     )
 
     p_struct = sub.add_parser(
