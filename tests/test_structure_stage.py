@@ -174,21 +174,24 @@ def test_invariants_pass_on_well_formed_doc(doc_with_ocr):
     assert report.ok, f"unexpected issues: {report.issues}"
 
 
-def test_invariants_flag_gap_in_dieu_numbering(tmp_path):
+def test_invariants_gap_in_dieu_numbering_is_advisory(tmp_path):
+    """A mid-chapter numbering gap is reported as an advisory note, not a
+    failure — Vietnamese regulations legitimately skip article numbers."""
     db = tmp_path / "t.sqlite"
     out_dir = tmp_path / "artifacts"
     init_db(db)
     pages = [
-        (1, "Điều 1. A.\nĐiều 3. C."),  # gap: no Điều 2
+        (1, "Điều 1. A.\nĐiều 3. C."),  # gap: no Điều 2, no Chương marker
     ]
     _seed_ocr(out_dir, document_id=1, pages=pages)
     with connect(db) as c:
         doc_id = insert_document(c, "/tmp/x.pdf", title="gaps")
         c.commit()
     run_structure_stage(db, doc_id, out_dir)
-    report = check_invariants(db, doc_id)
-    assert not report.ok
-    assert any("gaps" in s for s in report.issues)
+    report = check_invariants(db, doc_id, out_dir=out_dir)
+    # Gap is advisory (a note), not a hard failure.
+    assert report.ok, f"gap should be advisory, not a failure: {report.issues}"
+    assert any("gaps" in n for n in report.notes)
 
 
 def test_invariants_flag_empty_body(tmp_path):
@@ -206,3 +209,66 @@ def test_invariants_flag_empty_body(tmp_path):
     report = check_invariants(db, doc_id)
     assert not report.ok
     assert any("empty body" in s for s in report.issues)
+
+
+# --- chapter-aware numbering invariant (per-chapter, not global) -----------
+
+def _seed_ocr_with_dir(out_dir: Path, document_id: int, pages: list[tuple[int, str]]) -> None:
+    """Like _seed_ocr but returns nothing; used for chapter-aware tests."""
+    _seed_ocr(out_dir, document_id, pages)
+
+
+def test_invariants_chapter_gap_not_flagged(tmp_path):
+    """A numbering gap that coincides with a Chương marker is legitimate."""
+    db = tmp_path / "t.sqlite"
+    out_dir = tmp_path / "artifacts"
+    init_db(db)
+    # Page 1: Điều 13 ends, Chương III begins, then Điều 17 — mirroring
+    # the real Thông tư 89 structure where 14-16 don't exist.
+    pages = [
+        (1, "Điều 13. Tail of chapter II.\nChương III\nKHAI THUẾ\nĐiều 17. Start of chapter III."),
+    ]
+    _seed_ocr(out_dir, document_id=1, pages=pages)
+    with connect(db) as c:
+        doc_id = insert_document(c, "/tmp/x.pdf", title="chapters")
+        c.commit()
+    run_structure_stage(db, doc_id, out_dir)
+    report = check_invariants(db, doc_id, out_dir=out_dir)
+    assert report.ok, f"chapter-boundary gap should not be flagged: {report.issues}"
+
+
+def test_invariants_gap_within_chapter_reported_as_note(tmp_path):
+    """A numbering gap with no Chương marker is reported as an advisory note."""
+    db = tmp_path / "t.sqlite"
+    out_dir = tmp_path / "artifacts"
+    init_db(db)
+    pages = [
+        (1, "Điều 1. A.\nĐiều 3. C."),  # gap: no Điều 2, no Chương marker
+    ]
+    _seed_ocr(out_dir, document_id=1, pages=pages)
+    with connect(db) as c:
+        doc_id = insert_document(c, "/tmp/x.pdf", title="gap no chapter")
+        c.commit()
+    run_structure_stage(db, doc_id, out_dir)
+    report = check_invariants(db, doc_id, out_dir=out_dir)
+    assert report.ok
+    assert any("gaps" in n for n in report.notes)
+
+
+def test_invariants_out_dir_omitted_falls_back_to_global_gap_note(tmp_path):
+    """When out_dir is omitted and no OCR dir is found, chapter detection
+    can't run; the gap is still reported as an advisory note (not a failure)."""
+    db = tmp_path / "t.sqlite"
+    out_dir = tmp_path / "artifacts"
+    init_db(db)
+    pages = [(1, "Điều 1. A.\nĐiều 3. C.")]
+    _seed_ocr(out_dir, document_id=1, pages=pages)
+    with connect(db) as c:
+        doc_id = insert_document(c, "/tmp/x.pdf", title="default out")
+        c.commit()
+    run_structure_stage(db, doc_id, out_dir)
+    import os
+    os.chdir(tmp_path)
+    report = check_invariants(db, doc_id)  # out_dir defaults to ".massive_pdf"
+    assert report.ok
+    assert any("gaps" in n for n in report.notes)

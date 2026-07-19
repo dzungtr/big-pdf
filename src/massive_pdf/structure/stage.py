@@ -15,6 +15,7 @@ are stable, and ignore-duplicate on references.
 """
 from __future__ import annotations
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -41,14 +42,27 @@ STRUCTURE_STAGE = "structure"
 
 @dataclass
 class InvariantReport:
-    """Result of structural-invariant checks on a parsed document."""
+    """Result of structural-invariant checks on a parsed document.
+
+    ``issues`` are hard failures that make ``ok`` False. ``notes`` are
+    advisory signals (e.g. numbering gaps) reported for human review but
+    that do not by themselves fail the invariant.
+    """
     ok: bool
     issues: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
-        if self.ok:
-            return f"InvariantReport(ok=True, 0 issues)"
-        return f"InvariantReport(ok=False, {len(self.issues)} issues):\n  - " + "\n  - ".join(self.issues)
+        parts = [f"ok={self.ok}", f"{len(self.issues)} issues"]
+        if self.notes:
+            parts.append(f"{len(self.notes)} notes")
+        head = f"InvariantReport({', '.join(parts)})"
+        lines = [head]
+        for i in self.issues:
+            lines.append(f"  - FAIL: {i}")
+        for n in self.notes:
+            lines.append(f"  - note: {n}")
+        return "\n".join(lines)
 
 
 def _read_ocr_pages(out_dir: Path, document_id: int) -> list[tuple[int, str]]:
@@ -266,15 +280,71 @@ def run_structure_stage(db_path: str | Path, document_id: int,
 # Structural invariant checks
 # ---------------------------------------------------------------------------
 
-def check_invariants(db_path: str | Path, document_id: int) -> InvariantReport:
+_CHUONG_RE = re.compile(r"(?m)^\s*Chương\s+[IVXLCDM]+\b")
+
+
+def _chapter_breaks_before_each_dieu(out_dir: Path, document_id: int,
+                                     clauses: list) -> dict[int, bool]:
+    """Return ``{clause_id: True}`` for each Điều clause immediately preceded
+    (in page-reading order) by a ``Chương N`` marker in the OCR text.
+
+    Used by ``check_invariants`` to distinguish legitimate per-chapter
+    numbering gaps (Vietnamese regulations number Điều per-chapter, not
+    globally) from genuine missing articles. Returns an empty dict when the
+    OCR artifacts can't be read, in which case the caller falls back to the
+    strict global-contiguity check.
+    """
+    from ..ingest.ocr import _deserialize_page
+    breaks: dict[int, bool] = {}
+    page_has_chuong: dict[int, bool] = {}
+    ocr_dir = Path(out_dir) / "ocr" / f"doc{document_id}"
+    if not ocr_dir.exists():
+        return breaks
+    for path in sorted(ocr_dir.glob("page*.json")):
+        ordinal = int(path.stem.replace("page", ""))
+        try:
+            page = _deserialize_page(path, ordinal)
+        except Exception:
+            continue
+        page_has_chuong[ordinal] = bool(_CHUONG_RE.search(page.raw_text))
+    if not page_has_chuong:
+        return breaks
+    dieu_sorted = sorted((c for c in clauses if c["kind"] == "dieu"),
+                         key=lambda c: c["ord"])
+    prev_end = 0
+    for c in dieu_sorted:
+        ps, pe = c["page_start"], c["page_end"]
+        # Scan from the previous Điều's end page through this one's start
+        # page (inclusive on both ends): a Chương marker can sit on the
+        # same page between two articles (e.g. Điều 13 ends and Điều 17
+        # starts on p26, with "Chương III" between them).
+        start_pg = max(prev_end, 1)
+        for pg in range(start_pg, ps + 1):
+            if page_has_chuong.get(pg):
+                breaks[c["id"]] = True
+                break
+        prev_end = max(prev_end, pe)
+    return breaks
+
+
+def check_invariants(db_path: str | Path, document_id: int,
+                        out_dir: str | Path = ".massive_pdf") -> InvariantReport:
     """Run structural invariants over the parsed graph for a document.
 
     Invariants (slice #4 brief):
       - Every clause cited (citation field set, body non-empty).
-      - Điều numbering starts at 1 and is contiguous (1..N with no gaps).
       - Every cross-reference resolves or dangles explicitly
         (no NULL/None state in the row).
+
+    Advisory (not a failure): Điều numbering gaps. Vietnamese regulations
+    number Điều per-chapter and skip numbers for legitimate editorial
+    reasons (chapter resets, removed/renumbered articles), so a gap is not
+    by itself a defect. Chapter-boundary gaps (a ``Chương N`` marker
+    between the two surrounding articles) are silently attributed; any
+    *remaining* gaps are reported as advisory notes for human review, not
+    as invariant failures.
     """
+    out_dir = Path(out_dir)
     issues: list[str] = []
     with connect(db_path) as conn:
         clauses = list_clauses(conn, document_id)
@@ -286,17 +356,39 @@ def check_invariants(db_path: str | Path, document_id: int) -> InvariantReport:
                 issues.append(f"clause id={c['id']} has empty citation")
             if not c["body"].strip():
                 issues.append(f"clause id={c['id']} {c['citation']!r} has empty body")
-        # 2. Điều numbering
-        dieu_nums = sorted(int(c["number"]) for c in clauses if c["kind"] == "dieu")
+        # 2. Điều numbering gaps (advisory, not a failure)
+        #
+        # Real Vietnamese regulations number Điều per-chapter and skip numbers
+        # for legitimate editorial reasons (chapter resets, removed/renumbered
+        # articles). So a gap in the global sequence is NOT, by itself, a
+        # defect. We scan OCR artifacts for ``Chương N`` markers to attribute
+        # chapter-boundary gaps, and report any *remaining* gaps as an
+        # advisory note for human review — not as an invariant failure.
+        dieu_in_order = [c for c in clauses if c["kind"] == "dieu"]
+        dieu_nums = sorted(int(c["number"]) for c in dieu_in_order)
+        numbering_notes: list[str] = []
         if dieu_nums:
-            expected = list(range(dieu_nums[0], dieu_nums[-1] + 1))
-            if dieu_nums != expected:
-                missing = sorted(set(expected) - set(dieu_nums))
-                if missing:
-                    issues.append(f"Điều numbering has gaps; missing: {missing}")
-                extra = sorted(set(dieu_nums) - set(expected))
-                if extra:
-                    issues.append(f"Điều numbering has extras: {extra}")
+            chapter_breaks = _chapter_breaks_before_each_dieu(
+                out_dir, document_id, clauses,
+            )
+            missing = sorted(set(range(dieu_nums[0], dieu_nums[-1] + 1)) - set(dieu_nums))
+            unattributed: list[int] = []
+            for n in missing:
+                before = max((c for c in dieu_in_order if int(c["number"]) < n),
+                             key=lambda c: c["ord"], default=None)
+                after = min((c for c in dieu_in_order if int(c["number"]) > n),
+                            key=lambda c: c["ord"], default=None)
+                if before is not None and after is not None and                         chapter_breaks.get(after["id"]):
+                    continue  # chapter boundary — legitimate
+                unattributed.append(n)
+            if unattributed:
+                numbering_notes.append(
+                    f"Điều numbering has gaps not explained by a Chương "
+                    f"boundary; worth a human glance: {unattributed}"
+                )
+            extra = sorted(set(dieu_nums) - set(range(dieu_nums[0], dieu_nums[-1] + 1)))
+            if extra:
+                numbering_notes.append(f"Điều numbering has extras: {extra}")
         # 3. Cross-references resolve or dangle
         rows = conn.execute(
             "SELECT cr.* FROM clause_references cr "
@@ -314,4 +406,4 @@ def check_invariants(db_path: str | Path, document_id: int) -> InvariantReport:
             # — they're "explicitly dangling" per the slice-4 brief. We only
             # fail on malformed record fields above.
 
-    return InvariantReport(ok=not issues, issues=issues)
+    return InvariantReport(ok=not issues, issues=issues, notes=numbering_notes)

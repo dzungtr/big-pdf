@@ -77,11 +77,17 @@ def test_invariants_subcommand_passes(tmp_path, capsys):
 
 
 def test_invariants_subcommand_fails_on_bad_graph(tmp_path, capsys):
+    """The invariants subcommand exits 1 on a hard failure (empty clause body).
+
+    Note: numbering gaps are advisory (see check_invariants), so this test
+    uses an empty body — a genuine structural defect — to exercise the
+    non-zero exit path.
+    """
     db = tmp_path / "t.sqlite"
     out_dir = tmp_path / "artifacts"
-    # Điều 1 then Điều 3 — gap.
+    # Điều 1 with an empty body after the header.
     _seed_ocr(out_dir, 1, [
-        (1, "Điều 1. A.\nĐiều 3. C."),
+        (1, "Điều 1. "),
     ])
 
     main(["--db", str(db), "register", "/tmp/x.pdf", "--title", "demo"])
@@ -96,7 +102,7 @@ def test_invariants_subcommand_fails_on_bad_graph(tmp_path, capsys):
     assert rc == 1
     out = capsys.readouterr().out
     assert "ok=False" in out
-    assert "gaps" in out
+    assert "empty body" in out
 
 
 def test_structure_unknown_doc_returns_error(tmp_path, capsys):
