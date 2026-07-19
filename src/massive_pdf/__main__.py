@@ -22,6 +22,7 @@ from .store import (
     list_documents,
 )
 from .ingest.pages import DEFAULT_DPI, run_pages_stage
+from .ingest.ocr_import import import_ocr_markdown
 from .ingest.ocr import StubBackend, default_backend, run_ocr_stage
 from .ingest.vlm import UnlimitedOcrBackend
 from .structure import check_invariants, run_structure_stage
@@ -83,6 +84,27 @@ def cmd_ocr(args) -> int:
         backend = default_backend()
     n = run_ocr_stage(args.db, args.doc_id, args.out, backend=backend)
     print(f"ocr stage: doc_id={args.doc_id} pages={n} out={args.out}")
+    return 0
+
+
+def cmd_ocr_import(args) -> int:
+    """Import an Unlimited-OCR markdown file as the `ocr` stage's output.
+
+    Unlimited-OCR converts a whole PDF into a single markdown file (its
+    native long-horizon behavior). This subcommand splits that file by
+    its `<!-- page N-M -->` batch markers into the per-page OcrPage JSON
+    artifacts the rest of the pipeline consumes, and marks the `ocr`
+    checkpoints done — so a document can be ingested without re-running
+    OCR page-by-page through the VLM server.
+    """
+    init_db(args.db)
+    with connect(args.db) as conn:
+        doc = get_document(conn, args.doc_id)
+        if doc is None:
+            print(f"ocr-import: no document with id={args.doc_id}", file=sys.stderr)
+            return 2
+    n = import_ocr_markdown(args.db, args.doc_id, args.md, args.out)
+    print(f"ocr-import: doc_id={args.doc_id} pages={n} md={args.md} out={args.out}")
     return 0
 
 
@@ -224,6 +246,17 @@ def _build_parser() -> argparse.ArgumentParser:
              "for the launch recipe. Default: stub.",
     )
 
+    p_ocr_imp = sub.add_parser(
+        "ocr-import",
+        help="Import an Unlimited-OCR markdown file as the `ocr` stage output",
+    )
+    p_ocr_imp.add_argument("doc_id", type=int, help="Document id")
+    p_ocr_imp.add_argument("md", help="Path to the Unlimited-OCR markdown file")
+    p_ocr_imp.add_argument(
+        "--out", default=".massive_pdf",
+        help="Output root for OCR artifacts (default .massive_pdf)",
+    )
+
     p_struct = sub.add_parser(
         "structure",
         help="Parse OCR artifacts into a clause graph (slice 3 stage 3)",
@@ -286,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
         "list": cmd_list,
         "pages": cmd_pages,
         "ocr": cmd_ocr,
+        "ocr-import": cmd_ocr_import,
         "structure": cmd_structure,
         "invariants": cmd_invariants,
         "cards": cmd_cards,
