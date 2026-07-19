@@ -42,22 +42,34 @@ def _image_data_url(image_path: str) -> str:
     return f"data:{mime};base64,{data}"
 
 
-def _no_repeat_ngram_processor() -> dict:
-    """The non-standard logit-processor config the blessed launch requires.
+# Anti-repetition n-gram size the blessed launch recipe expects (epic #19 / runbook).
+NO_REPEAT_NGRAM_SIZE = 35
+# Sliding window (in tokens) the README recommends for single-image OCR.
+SINGLE_IMAGE_WINDOW_SIZE = 128
+# Single-image preprocessing mode from the README's `generate(...)` example.
+SINGLE_IMAGE_MODE = "gundam"
 
-    `--enable-custom-logit-processor` + `DeepseekOCRNoRepeatNGramLogitProcessor`
-    (ngram_size=35) is mandatory for sane anti-repetition output (runbook /
-    epic #19). It travels in the request body because this SGLang endpoint is
-    OpenAI-compatible only up to the chat-completions surface.
+
+def _deepseek_ocr_logit_processor_str() -> str:
+    """Serialize the Deepseek-OCR no-repeat n-gram processor to a string.
+
+    The baidu/Unlimited-OCR contract (cached README `generate(...)`) requires
+    `custom_logit_processor` to be `DeepseekOCRNoRepeatNGramLogitProcessor.to_str()`
+    — a JSON **string** of the form `{"callable": "<hex dill payload>"}` — not a
+    list-of-dicts. SGLang's io_struct declares the field
+    `Optional[Union[List[Optional[str]], str]]` and `CustomLogitProcessor.from_str`
+    deserializes it server-side; the list-of-dicts shape the previous code sent
+    was rejected with HTTP 400 (`Input should be a valid string`).
+
+    Importing `sglang` is deferred to call-time so this module imports cleanly
+    in environments without the wheel (e.g. CI without sglang). The wheel IS
+    installed in this repo's `.venv`, so the lazy import succeeds here.
     """
-    return {
-        "custom_logit_processor": [
-            {
-                "class": "DeepseekOCRNoRepeatNGramLogitProcessor",
-                "args": {"ngram_size": 35},
-            }
-        ],
-    }
+    from sglang.srt.sampling.custom_logit_processor import (
+        DeepseekOCRNoRepeatNGramLogitProcessor,
+    )
+
+    return DeepseekOCRNoRepeatNGramLogitProcessor.to_str()
 
 
 class UnlimitedOcrBackend:
@@ -93,7 +105,17 @@ class UnlimitedOcrBackend:
             "temperature": 0,
             "stream": True,
         }
-        body.update(_no_repeat_ngram_processor())
+        body.update(
+            {
+                "skip_special_tokens": False,
+                "images_config": {"image_mode": SINGLE_IMAGE_MODE},
+                "custom_logit_processor": _deepseek_ocr_logit_processor_str(),
+                "custom_params": {
+                    "ngram_size": NO_REPEAT_NGRAM_SIZE,
+                    "window_size": SINGLE_IMAGE_WINDOW_SIZE,
+                },
+            }
+        )
         return body
 
     def transcribe(self, image_path: str, page_ordinal: int) -> OcrPage:
