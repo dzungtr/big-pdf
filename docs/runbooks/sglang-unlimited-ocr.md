@@ -72,10 +72,15 @@ here so the run is reproducible:
 2. **`--disable-cuda-graph`** — the CUDA-graph JIT kernel (`sgl_kernel_jit_*`)
    failed to compile because the system GCC (15.2.1) is newer than the CUDA
    toolkit's supported host compiler (GCC <= 14), and the `tvm-ffi` headers
-   don't compile under libstdc++15. Passing `--disable-cuda-graph` skips the JIT
-   step entirely. There is a decode-throughput penalty, but the server starts
-   and serves correct output. On a machine with GCC <= 14 this flag is not
-   needed. See troubleshooting for the full error and alternatives.
+   don't compile under libstdc++15. Note: for the installed SGLang
+   `0.0.0.dev11416+g92e8bb79e` (PyPI `0.5.9`-line) wheel, `--disable-cuda-graph`
+   toggles **only** `server_args.disable_cuda_graph`; it does **NOT** prevent the
+   RoPE JIT build. `sglang/jit_kernel/rope.py:30` (`_jit_fused_rope_module()`)
+   is called on the decode path regardless of this flag, so the RoPE JIT compile
+   can still fail under GCC 15 / libstdc++15 even with `--disable-cuda-graph`
+   set. Passing the flag avoids the CUDA-graph capture JIT, so there is a
+   decode-throughput penalty, but it is not a complete JIT skip. See
+   troubleshooting for the full error and the real RoPE-JIT mitigations.
 
 So the full command that was verified on this box is:
 
@@ -176,11 +181,18 @@ see troubleshooting.
   `NVCC_PREPEND_FLAGS=--allow-unsupported-compiler` bypasses nvcc's version
   check but may still fail at the C++ standard-library level
   (`std::construct_at` / `tvm-ffi::String` deduction errors under libstdc++15).
-  The robust workaround on such a box is `--disable-cuda-graph` (used in the
-  verified command above); it skips the JIT entirely at a decode-throughput
-  cost. The preferred long-term fix is a GCC <= 14 toolchain for CUDA
-  compilation. SGLang also suggests `--cuda-graph-max-bs 16` or lowering
-  `--mem-fraction-static`.
+  **`--disable-cuda-graph` does NOT skip the RoPE JIT** — for the installed
+  SGLang `0.0.0.dev11416+g92e8bb79e` (PyPI `0.5.9`-line) wheel, that flag toggles
+  only `server_args.disable_cuda_graph`; `sglang/jit_kernel/rope.py:30`
+  (`_jit_fused_rope_module()`) still runs on the decode path and its build can
+  fail under GCC 15 / libstdc++15. `--disable-cuda-graph` avoids only the
+  CUDA-graph capture JIT (at a decode-throughput cost), not the RoPE JIT.
+  Real mitigations for the RoPE JIT failure (environment-owner decisions — see
+  epic #19's `ready-for-human` note for blocker #2): (a) install a GCC <= 14
+  toolchain and pass `-ccbin gcc-14` to nvcc; (b) pre-compile the RoPE kernel on
+  a compatible box and populate `~/.cache/tvm-ffi/`; (c) rebuild/reinstall
+  SGLang with a Triton fallback for the RoPE kernel. SGLang also suggests
+  `--cuda-graph-max-bs 16` or lowering `--mem-fraction-static`.
 - **Server not reachable on `127.0.0.1:10000`:** confirm the process is alive
   (`ps aux | grep sglang`), confirm the port is bound
   (`ss -ltnp | grep 10000`), and re-run `curl http://127.0.0.1:10000/v1/models`.
