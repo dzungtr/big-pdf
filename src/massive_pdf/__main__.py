@@ -152,7 +152,7 @@ def cmd_invariants(args) -> int:
             print(f"invariants: no document with id={args.doc_id}",
                   file=sys.stderr)
             return 2
-    report = check_invariants(args.db, args.doc_id)
+    report = check_invariants(args.db, args.doc_id, out_dir=args.out)
     print(str(report))
     return 0 if report.ok else 1
 
@@ -275,6 +275,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run structural-invariant checks on a document's clause graph",
     )
     p_inv.add_argument("doc_id", type=int, help="Document id")
+    p_inv.add_argument(
+        "--out", default=".massive_pdf",
+        help="Output root for OCR artifacts (default .massive_pdf)",
+    )
 
     p_cards = sub.add_parser(
         "cards",
