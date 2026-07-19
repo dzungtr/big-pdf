@@ -8,6 +8,8 @@ dependencies = [
     "pymupdf>=1.24",
     # Slice 5: numpy is used by the retrieval encoder/stage (issue #5).
     "numpy>=1.26",
+    # Slice 3 (epic #19): HTTP client for UnlimitedOcrBackend (VLM server).
+    "httpx>=0.27",
 ]
 description = "Ingestion + retrieval layer for Vietnamese regulatory PDFs."
 readme = "README.md"

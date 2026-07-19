@@ -102,6 +102,22 @@ class StubBackend:
 
 
 def default_backend() -> OcrBackend:
+    """Select the default OCR backend based on the environment.
+
+    If ``MASSIVE_PDF_VLM_ENDPOINT`` is explicitly set, return an
+    ``UnlimitedOcrBackend`` pointed at it (which fails loudly with the
+    SGLang launch command if the server is unreachable — that is the
+    contract documented in ``docs/runbooks/sglang-unlimited-ocr.md``).
+    Otherwise return ``StubBackend``, the offline CI default (no GPU, no
+    network) so the existing stub tests pass without any env juggling.
+
+    Use the ``--backend`` CLI flag to override this unconditionally.
+    """
+    import os
+
+    if os.environ.get("MASSIVE_PDF_VLM_ENDPOINT"):
+        from .vlm import UnlimitedOcrBackend
+        return UnlimitedOcrBackend()
     return StubBackend()
 
 
