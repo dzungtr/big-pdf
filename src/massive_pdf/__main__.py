@@ -92,6 +92,92 @@ def cmd_smoke(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Slice 3 (issue #4): structure + invariants subcommands
+# ---------------------------------------------------------------------------
+
+def cmd_structure(args) -> int:
+    init_db(args.db)
+    with connect(args.db) as conn:
+        doc = get_document(conn, args.doc_id)
+        if doc is None:
+            print(f"structure stage: no document with id={args.doc_id}",
+                  file=sys.stderr)
+            return 2
+    result = run_structure_stage(args.db, args.doc_id, args.out,
+                                 rebuild=args.rebuild)
+    print(
+        f"structure stage: doc_id={args.doc_id} clauses={result['clauses']} "
+        f"refs_internal={result['refs_internal']} "
+        f"refs_external={result['refs_external']} "
+        f"pages={result['pages']} out={args.out}"
+    )
+    return 0
+
+
+def cmd_invariants(args) -> int:
+    init_db(args.db)
+    with connect(args.db) as conn:
+        doc = get_document(conn, args.doc_id)
+        if doc is None:
+            print(f"invariants: no document with id={args.doc_id}",
+                  file=sys.stderr)
+            return 2
+    report = check_invariants(args.db, args.doc_id)
+    print(str(report))
+    return 0 if report.ok else 1
+
+
+# ---------------------------------------------------------------------------
+# Slice 5 (issue #5): rule-cards subcommands
+# ---------------------------------------------------------------------------
+
+def cmd_cards(args) -> int:
+    init_db(args.db)
+    with connect(args.db) as conn:
+        doc = get_document(conn, args.doc_id)
+        if doc is None:
+            print(f"cards stage: no document with id={args.doc_id}",
+                  file=sys.stderr)
+            return 2
+    result = run_cards_stage(args.db, args.doc_id, args.out,
+                             rebuild=args.rebuild)
+    status = "done" if result["ok"] else "with-errors"
+    print(
+        f"cards stage: doc_id={args.doc_id} "
+        f"clauses_scanned={result['clauses_scanned']} "
+        f"cards_inserted={result['cards_inserted']} "
+        f"skipped={result['skipped']} "
+        f"failed={len(result['failed'])} "
+        f"status={status} out={args.out}"
+    )
+    return 0 if result["ok"] else 1
+
+
+def cmd_embed(args) -> int:
+    init_db(args.db)
+    with connect(args.db) as conn:
+        doc = get_document(conn, args.doc_id)
+        if doc is None:
+            print(f"embed stage: no document with id={args.doc_id}",
+                  file=sys.stderr)
+            return 2
+    encoder = get_default_encoder(dim=args.dim)
+    result = run_embed_stage(args.db, args.doc_id, encoder,
+                             rebuild=args.rebuild)
+    status = "done" if result["ok"] else "with-errors"
+    print(
+        f"embed stage: doc_id={args.doc_id} "
+        f"cards_scanned={result['cards_scanned']} "
+        f"embedded={result['embedded']} "
+        f"skipped={result['skipped']} "
+        f"dim={result['dim']} "
+        f"failed={len(result['failed'])} "
+        f"status={status}"
+    )
+    return 0 if result["ok"] else 1
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="massive-pdf")
     parser.add_argument("--db", default=".massive_pdf.sqlite")
@@ -194,89 +280,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
-# ---------------------------------------------------------------------------
-# Slice 3 (issue #4): structure + invariants subcommands
-# ---------------------------------------------------------------------------
-
-def cmd_structure(args) -> int:
-    init_db(args.db)
-    with connect(args.db) as conn:
-        doc = get_document(conn, args.doc_id)
-        if doc is None:
-            print(f"structure stage: no document with id={args.doc_id}",
-                  file=sys.stderr)
-            return 2
-    result = run_structure_stage(args.db, args.doc_id, args.out,
-                                 rebuild=args.rebuild)
-    print(
-        f"structure stage: doc_id={args.doc_id} clauses={result['clauses']} "
-        f"refs_internal={result['refs_internal']} "
-        f"refs_external={result['refs_external']} "
-        f"pages={result['pages']} out={args.out}"
-    )
-    return 0
-
-
-def cmd_invariants(args) -> int:
-    init_db(args.db)
-    with connect(args.db) as conn:
-        doc = get_document(conn, args.doc_id)
-        if doc is None:
-            print(f"invariants: no document with id={args.doc_id}",
-                  file=sys.stderr)
-            return 2
-    report = check_invariants(args.db, args.doc_id)
-    print(str(report))
-    return 0 if report.ok else 1
-
-
-# ---------------------------------------------------------------------------
-# Slice 5 (issue #5): rule-cards subcommands
-# ---------------------------------------------------------------------------
-
-def cmd_cards(args) -> int:
-    init_db(args.db)
-    with connect(args.db) as conn:
-        doc = get_document(conn, args.doc_id)
-        if doc is None:
-            print(f"cards stage: no document with id={args.doc_id}",
-                  file=sys.stderr)
-            return 2
-    result = run_cards_stage(args.db, args.doc_id, args.out,
-                             rebuild=args.rebuild)
-    status = "done" if result["ok"] else "with-errors"
-    print(
-        f"cards stage: doc_id={args.doc_id} "
-        f"clauses_scanned={result['clauses_scanned']} "
-        f"cards_inserted={result['cards_inserted']} "
-        f"skipped={result['skipped']} "
-        f"failed={len(result['failed'])} "
-        f"status={status} out={args.out}"
-    )
-    return 0 if result["ok"] else 1
-
-
-def cmd_embed(args) -> int:
-    init_db(args.db)
-    with connect(args.db) as conn:
-        doc = get_document(conn, args.doc_id)
-        if doc is None:
-            print(f"embed stage: no document with id={args.doc_id}",
-                  file=sys.stderr)
-            return 2
-    encoder = get_default_encoder(dim=args.dim)
-    result = run_embed_stage(args.db, args.doc_id, encoder,
-                             rebuild=args.rebuild)
-    status = "done" if result["ok"] else "with-errors"
-    print(
-        f"embed stage: doc_id={args.doc_id} "
-        f"cards_scanned={result['cards_scanned']} "
-        f"embedded={result['embedded']} "
-        f"skipped={result['skipped']} "
-        f"dim={result['dim']} "
-        f"failed={len(result['failed'])} "
-        f"status={status}"
-    )
-    return 0 if result["ok"] else 1
