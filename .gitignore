@@ -6,3 +6,5 @@ __pycache__/
 # Source PDFs (intake for ingestion) — not checked into the repo.
 *.pdf
 *.egg-info/
+# Throwaway pipeline output from local smoke runs.
+work/
